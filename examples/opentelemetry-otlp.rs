@@ -5,9 +5,12 @@ use opentelemetry_sdk::{
         Aggregation, Instrument, MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Stream,
     },
     runtime,
-    trace::{BatchConfig, RandomIdGenerator, Sampler, Tracer},
     Resource,
 };
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace as sdktrace;
+use opentelemetry::trace::TraceError;
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_semantic_conventions::{
     resource::{DEPLOYMENT_ENVIRONMENT, SERVICE_NAME, SERVICE_VERSION},
     SCHEMA_URL,
@@ -92,36 +95,37 @@ fn init_meter_provider() -> SdkMeterProvider {
 }
 
 // Construct Tracer for OpenTelemetryLayer
-fn init_tracer() -> Tracer {
+fn init_tracer_provider() -> Result<opentelemetry_sdk::trace::TracerProvider, TraceError> {
     opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_trace_config(
-            opentelemetry_sdk::trace::Config::default()
-                // Customize sampling strategy
-                .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-                    1.0,
-                ))))
-                // If export trace to AWS X-Ray, you can use XrayIdGenerator
-                .with_id_generator(RandomIdGenerator::default())
-                .with_resource(resource()),
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint("http://localhost:4317"),
         )
-        .with_batch_config(BatchConfig::default())
-        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+        .with_trace_config(
+            sdktrace::Config::default().with_resource(Resource::new(vec![KeyValue::new(
+                SERVICE_NAME,
+                "tracing-jaeger",
+            )])),
+        )
         .install_batch(runtime::Tokio)
-        .unwrap()
 }
 
 // Initialize tracing-subscriber and return OtelGuard for opentelemetry-related termination processing
 fn init_tracing_subscriber() -> OtelGuard {
     let meter_provider = init_meter_provider();
-
+    let tracer_provider: opentelemetry_sdk::trace::TracerProvider = init_tracer_provider().expect("Failed to initialize tracer provider.");
+    let tracer = tracer_provider.tracer("tracing-otel-subscriber");
+    global::set_tracer_provider(tracer_provider.clone());
+    //let tracer = global::tracer("tracing-otel-subscriber");
     tracing_subscriber::registry()
-        .with(tracing_subscriber::filter::LevelFilter::from_level(
+       .with(tracing_subscriber::filter::LevelFilter::from_level(
             Level::INFO,
         ))
         .with(tracing_subscriber::fmt::layer())
         .with(MetricsLayer::new(meter_provider.clone()))
-        .with(OpenTelemetryLayer::new(init_tracer()))
+        .with(OpenTelemetryLayer::new(tracer))
         .init();
 
     OtelGuard { meter_provider }

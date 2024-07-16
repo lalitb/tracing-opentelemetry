@@ -7,6 +7,7 @@ use std::{
 };
 
 use opentelemetry::{global, trace::TracerProvider};
+use opentelemetry_sdk::Resource;
 
 use opentelemetry_sdk::{
     self as sdk,
@@ -57,7 +58,7 @@ fn double_failable_work(fail: bool) -> Result<&'static str, Error> {
 }
 
 fn main() -> Result<(), Box<dyn StdError + Send + Sync + 'static>> {
-    let builder = sdk::trace::TracerProvider::builder().with_simple_exporter(WriterExporter);
+    let builder = sdk::trace::TracerProvider::builder().with_simple_exporter(WriterExporter{resource: Resource::default()});
     let provider = builder.build();
     let tracer = provider
         .tracer_builder("opentelemetry-write-exporter")
@@ -93,7 +94,10 @@ fn main() -> Result<(), Box<dyn StdError + Send + Sync + 'static>> {
 }
 
 #[derive(Debug)]
-struct WriterExporter;
+struct WriterExporter{
+    // set exporter
+    resource: Resource
+}
 
 impl SpanExporter for WriterExporter {
     fn export(
@@ -102,19 +106,28 @@ impl SpanExporter for WriterExporter {
     ) -> futures_util::future::BoxFuture<'static, sdk::export::trace::ExportResult> {
         let mut writer = std::io::stdout();
         for span in batch {
-            writeln!(writer, "{}", SpanData(span)).unwrap();
+            let span_data = SpanData {span: span, resource: self.resource.clone()};
+            writeln!(writer, "{}", span_data).unwrap();
         }
         writeln!(writer).unwrap();
 
         Box::pin(async move { ExportResult::Ok(()) })
     }
+
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.resource = resource.clone();
+        
+    }
 }
 
-struct SpanData(sdk::export::trace::SpanData);
+struct SpanData{
+    span: sdk::export::trace::SpanData,
+    resource: Resource,
+}
 impl Display for SpanData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Span: \"{}\"", self.0.name)?;
-        match &self.0.status {
+        writeln!(f, "Span: \"{}\"", self.span.name)?;
+        match &self.span.status {
             opentelemetry::trace::Status::Unset => {}
             opentelemetry::trace::Status::Error { description } => {
                 writeln!(f, "- Status: Error")?;
@@ -125,7 +138,7 @@ impl Display for SpanData {
         writeln!(
             f,
             "- Start: {}",
-            self.0
+            self.span
                 .start_time
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .expect("start time is before the unix epoch")
@@ -134,23 +147,23 @@ impl Display for SpanData {
         writeln!(
             f,
             "- End: {}",
-            self.0
+            self.span
                 .end_time
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .expect("end time is before the unix epoch")
                 .as_secs()
         )?;
         writeln!(f, "- Resource:")?;
-        for (k, v) in self.0.resource.iter() {
+        for (k, v) in self.resource.iter() {
             writeln!(f, "  - {}: {}", k, v)?;
         }
         writeln!(f, "- Attributes:")?;
-        for kv in self.0.attributes.iter() {
+        for kv in self.span.attributes.iter() {
             writeln!(f, "  - {}: {}", kv.key, kv.value)?;
         }
 
         writeln!(f, "- Events:")?;
-        for event in self.0.events.iter() {
+        for event in self.span.events.iter() {
             if let Some(error) =
                 event
                     .attributes
@@ -171,7 +184,7 @@ impl Display for SpanData {
             }
         }
         writeln!(f, "- Links:")?;
-        for link in self.0.links.iter() {
+        for link in self.span.links.iter() {
             writeln!(f, "  - {:?}", link)?;
         }
         Ok(())
